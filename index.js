@@ -119,7 +119,7 @@ async function tick() {
     .select("*")
     .not("amg_queued_at", "is", null)
     .is("amg_sent_at", null)
-    .limit(25);
+    .limit(100);
 
   if (error) { console.error(new Date().toISOString(), "query error:", error.message); return; }
   if (!data || data.length === 0) return;

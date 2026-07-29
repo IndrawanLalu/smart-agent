@@ -1,0 +1,13 @@
+{
+  "name": "smart-amg-agent",
+  "version": "1.0.0",
+  "description": "Agen lokal SMART Mataram — kirim pengukuran gardu (antrean) ke AMG intranet PLN",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.98.0",
+    "dotenv": "^16.4.5"
+  }
+}

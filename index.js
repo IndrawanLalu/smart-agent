@@ -13,6 +13,7 @@ const {
   SUPABASE_SERVICE_ROLE_KEY,
   AMG_URL = "http://10.33.1.77/gardu", // default; bisa dioverride per-ULP di tabel amg_config
   POLL_INTERVAL_SEC = "60",
+  AMG_MAX_ATTEMPTS = "3",
 } = process.env;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -22,6 +23,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 const INTERVAL = Math.max(15, parseInt(POLL_INTERVAL_SEC, 10) || 60) * 1000;
+const MAX_ATTEMPTS = Math.max(1, parseInt(AMG_MAX_ATTEMPTS, 10) || 3);
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const originOf = (base) => base.replace(/\/gardu.*$/, "");
 
@@ -114,11 +116,14 @@ async function sendOne(row, cfg) {
 
 // ── Loop ─────────────────────────────────────────────────────────────────────
 async function tick() {
+  // Ambil hanya yang belum mentok batas percobaan. Tanpa filter ini, baris yang
+  // gagal permanen (mis. URL AMG salah) dicoba ulang tiap siklus selamanya.
   const { data, error } = await supabase
     .from("pengukuran_gardu")
     .select("*")
     .not("amg_queued_at", "is", null)
     .is("amg_sent_at", null)
+    .lt("amg_attempts", MAX_ATTEMPTS)
     .limit(100);
 
   if (error) { console.error(new Date().toISOString(), "query error:", error.message); return; }
@@ -133,23 +138,30 @@ async function tick() {
   for (const row of data) {
     const cfg = byUlp[row.petugas_unit];
     if (!cfg || !cfg.username || !cfg.password) {
+      const n = (row.amg_attempts ?? 0) + 1;
       await supabase.from("pengukuran_gardu")
-        .update({ amg_error: `Kredensial AMG ULP ${row.petugas_unit || "?"} belum diatur` })
+        .update({ amg_error: `Kredensial AMG ULP ${row.petugas_unit || "?"} belum diatur`, amg_attempts: n })
         .eq("id", row.id);
-      console.error("  ✗ kredensial ULP belum diatur:", row.petugas_unit, "-", row.no_gardu);
+      console.error(`  ✗ kredensial ULP belum diatur: ${row.petugas_unit} - ${row.no_gardu} (percobaan ${n}/${MAX_ATTEMPTS})`);
       continue;
     }
     try {
       await sendOne(row, cfg);
-      await supabase.from("pengukuran_gardu").update({ amg_sent_at: new Date().toISOString(), amg_error: null }).eq("id", row.id);
+      await supabase.from("pengukuran_gardu")
+        .update({ amg_sent_at: new Date().toISOString(), amg_error: null, amg_attempts: 0 })
+        .eq("id", row.id);
       console.log(`  ✓ terkirim: ${row.no_gardu} (${row.petugas_unit})`);
     } catch (e) {
-      await supabase.from("pengukuran_gardu").update({ amg_error: String(e).slice(0, 300) }).eq("id", row.id);
-      console.error("  ✗ gagal:", row.no_gardu, "-", String(e).slice(0, 120));
+      const n = (row.amg_attempts ?? 0) + 1;
+      await supabase.from("pengukuran_gardu")
+        .update({ amg_error: String(e).slice(0, 300), amg_attempts: n })
+        .eq("id", row.id);
+      const habis = n >= MAX_ATTEMPTS ? " — BERHENTI, antre ulang dari web untuk mencoba lagi" : "";
+      console.error(`  ✗ gagal (${n}/${MAX_ATTEMPTS}): ${row.no_gardu} - ${String(e).slice(0, 120)}${habis}`);
     }
   }
 }
 
-console.log(`SMART AMG agent aktif · AMG default=${AMG_URL} · kredensial per-ULP dari tabel amg_config · interval ${INTERVAL / 1000}s`);
+console.log(`SMART AMG agent aktif · AMG default=${AMG_URL} · kredensial per-ULP dari tabel amg_config · interval ${INTERVAL / 1000}s · maks ${MAX_ATTEMPTS} percobaan/baris`);
 tick();
 setInterval(tick, INTERVAL);

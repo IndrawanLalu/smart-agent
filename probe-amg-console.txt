@@ -1,0 +1,88 @@
+SMART Mataram — Periksa AMG lewat Console browser
+=================================================
+Dipakai kalau tidak sedang memegang PC smart-agent. Syaratnya cuma satu:
+browser sudah login ke AMG. Sesi ikut terbawa otomatis (same-origin), jadi
+tidak perlu username/password.
+
+HANYA MEMBACA — semua permintaan GET. Tidak ada save_ukur.
+
+Buka DevTools dengan F12 -> tab Console, lalu tempel salah satu di bawah.
+
+
+─────────────────────────────────────────────────────────────────────
+CARA 1 — paling cepat, kalau sudah berada di halaman input pengukuran
+─────────────────────────────────────────────────────────────────────
+Langsung membaca form yang sedang terbuka. Kalau AMG mengisi daya_trafo
+dari master-nya, akan langsung kelihatan di sini.
+
+copy([...document.querySelectorAll('input,select')].filter(e=>e.name).map(e=>e.name+' = '+JSON.stringify(e.value)).join('\n'))
+
+Hasilnya tersalin ke clipboard. Tempel balik ke chat.
+
+
+─────────────────────────────────────────────────────────────────────
+CARA 2 — kalau belum tahu halaman mana yang benar
+─────────────────────────────────────────────────────────────────────
+Menyusuri belasan pola alamat dan melaporkan mana yang memuat daya_trafo.
+Ganti NO_GARDU dan PREFIX sesuai ULP sebelum menjalankan.
+
+(async () => {
+  const NO_GARDU = "GS201";              // <- ganti nomor gardu
+  const PREFIX   = ["44150", "44151"];   // <- AMPENAN. Tanjung 44130/44131, Cakra 44110/44111
+  const out = [];
+  const log = (s) => { out.push(s); console.log(s); };
+
+  const paths = [];
+  for (const p of PREFIX) {
+    const kode = p + NO_GARDU;
+    for (const m of ["input","ukur","detail","edit","form","save_ukur","view"])
+      paths.push(`/gardu/index.php/cUkur/${m}/${kode}`);
+    paths.push(`/gardu/index.php/cUkur?kode=${kode}`);
+    paths.push(`/gardu/index.php/cGardu/detail/${kode}`);
+    paths.push(`/gardu/index.php/cGardu/edit/${kode}`);
+  }
+  paths.push("/gardu/index.php/cUkur", "/gardu/index.php/cGardu");
+
+  log("=== PERIKSA AMG (baca saja) === " + new Date().toISOString());
+  log("gardu: " + NO_GARDU + " | prefix: " + PREFIX.join(","));
+
+  for (const path of paths) {
+    try {
+      const r = await fetch(path, { credentials: "same-origin" });
+      const html = await r.text();
+      const punya = /daya_trafo|i_nominal/i.test(html);
+      const keLogin = /cLogin\/login|name=["']password["']/i.test(html) && !punya;
+      log(`[${r.status}] ${path}` + (punya ? "  *** ADA daya_trafo ***" : keLogin ? "  (terlempar ke login)" : ""));
+      if (punya) {
+        const d = new DOMParser().parseFromString(html, "text/html");
+        log("   judul: " + (d.title || "-"));
+        for (const el of d.querySelectorAll("input,select")) {
+          if (!el.name) continue;
+          const penting = /daya_trafo|i_nominal|kode|beban|kva/i.test(el.name);
+          log(`   ${penting ? ">>" : "  "} ${el.name} = ${JSON.stringify(el.value)}`);
+        }
+      }
+    } catch (e) {
+      log(`[ERR] ${path} — ${e.message}`);
+    }
+  }
+
+  const teks = out.join("\n");
+  try { copy(teks); log("\n>>> Hasil sudah disalin ke clipboard."); }
+  catch { console.log("Clipboard gagal — salin manual dari output di atas."); }
+})();
+
+
+─────────────────────────────────────────────────────────────────────
+Yang dicari
+─────────────────────────────────────────────────────────────────────
+Baris yang diawali ">>" — terutama:
+
+    >> daya_trafo = "160"
+    >> i_nominal  = "230.94"
+
+Kalau nilainya TERISI, berarti AMG menyimpan kVA-nya sendiri dan opsi B
+(batalkan kirim kalau berbeda) bisa dijalankan otomatis.
+
+Kalau kosong (""), berarti AMG menunggu kita yang mengisi — kVA tidak
+tersimpan di master AMG, dan opsi B perlu sumber pembanding lain.

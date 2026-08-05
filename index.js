@@ -94,24 +94,88 @@ async function loginAmg(base, username, password) {
   return `ci_session=${m[m.length - 1][1]}`;
 }
 
+/** Ambil value <input name="daya_trafo"> — urutan atribut bisa terbalik. */
+function parseDayaTrafo(html) {
+  const m =
+    html.match(/name=["']daya_trafo["'][^>]*?value=["']([^"']*)["']/i) ||
+    html.match(/value=["']([^"']*)["'][^>]*?name=["']daya_trafo["']/i);
+  if (!m) return null;
+  const n = Number(String(m[1]).trim().replace(",", "."));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Baca kVA versi AMG lewat tahap pencarian gardu.
+ *
+ * AMG dua tahap: cari gardu (cGardu/list_gardu_pengukuran) → form pengukuran
+ * muncul dengan daya_trafo TERISI dari master. Null = gardu tidak ada pada
+ * prefix itu.
+ */
+async function fetchAmgKva(base, cookie, noGardu, prefix) {
+  const res = await fetch(`${base}/index.php/cGardu/list_gardu_pengukuran`, {
+    method: "POST",
+    signal: AbortSignal.timeout(15000),
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": UA, Cookie: cookie, Referer: `${base}/index.php/cUkur`,
+    },
+    body: new URLSearchParams({
+      kodegardu: noGardu,
+      kodegarduid: prefix + noGardu,
+      mode: "input",
+      submit: "Tampilkan",
+    }),
+    redirect: "manual",
+  });
+  const html = await res.text().catch(() => "");
+  return parseDayaTrafo(html);
+}
+
 // cfg = { username, password, kode_prefixes, amg_url }
 async function sendOne(row, cfg) {
   const base = cfg.amg_url || AMG_URL;
   const prefixes = String(cfg.kode_prefixes || "44150,44151").split(",").map((p) => p.trim()).filter(Boolean);
   const cookie = await loginAmg(base, cfg.username, cfg.password);
+  const noGardu = String(row.no_gardu ?? "");
+  const kvaSmart = Number(row.kva_trafo ?? 0);
+
+  // Cari gardunya dulu. Selain memberi kVA versi AMG, ini menentukan prefix mana
+  // yang benar — sebelumnya body yang sama ditembakkan ke semua prefix.
+  let prefixCocok = null;
+  let kvaAmg = null;
   for (const prefix of prefixes) {
-    const res = await fetch(`${base}/index.php/cUkur/save_ukur`, {
-      method: "POST",
-      signal: AbortSignal.timeout(15000),
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": UA, Cookie: cookie, Referer: `${base}/index.php/cUkur/save_ukur`,
-      },
-      body: buildBody(row, prefix),
-      redirect: "manual",
-    });
-    try { await res.text(); } catch (_) { /* drain */ }
+    const kva = await fetchAmgKva(base, cookie, noGardu, prefix);
+    if (kva !== null) { prefixCocok = prefix; kvaAmg = kva; break; }
   }
+
+  if (prefixCocok === null) {
+    throw new Error(`Gardu ${noGardu} tidak ditemukan di AMG (prefix: ${prefixes.join(", ")})`);
+  }
+
+  // Gerbang kVA: rating trafo beda = penyebut persentase beban beda. Menanam
+  // angka yang bertentangan dengan master AMG lebih buruk daripada tidak kirim.
+  if (Math.abs(kvaAmg - kvaSmart) > 0.01) {
+    throw new Error(`kVA berbeda — SMART ${kvaSmart} kVA, AMG ${kvaAmg} kVA. Samakan dulu data trafonya.`);
+  }
+
+  const res = await fetch(`${base}/index.php/cUkur/save_ukur`, {
+    method: "POST",
+    signal: AbortSignal.timeout(15000),
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": UA, Cookie: cookie, Referer: `${base}/index.php/cUkur/save_ukur`,
+    },
+    body: buildBody(row, prefixCocok),
+    redirect: "manual",
+  });
+
+  // Respons dibaca, bukan dibuang: halaman galat AMG pun berstatus 200, jadi
+  // tanpa memeriksa isinya status "terkirim" cuma dugaan.
+  const balasan = await res.text().catch(() => "");
+  if (res.status >= 400 || /gagal|error|tidak valid/i.test(balasan.slice(0, 2000))) {
+    throw new Error(`AMG menolak simpan (HTTP ${res.status})`);
+  }
+  return { prefix: prefixCocok, kvaAmg };
 }
 
 // ── Loop ─────────────────────────────────────────────────────────────────────
@@ -146,18 +210,25 @@ async function tick() {
       continue;
     }
     try {
-      await sendOne(row, cfg);
+      const hasil = await sendOne(row, cfg);
       await supabase.from("pengukuran_gardu")
         .update({ amg_sent_at: new Date().toISOString(), amg_error: null, amg_attempts: 0 })
         .eq("id", row.id);
-      console.log(`  ✓ terkirim: ${row.no_gardu} (${row.petugas_unit})`);
+      console.log(`  ✓ terkirim: ${hasil.prefix}${row.no_gardu} (${row.petugas_unit}) · kVA ${hasil.kvaAmg}`);
     } catch (e) {
-      const n = (row.amg_attempts ?? 0) + 1;
+      const pesan = String(e).replace(/^Error:\s*/, "");
+      // Selisih kVA bukan kegagalan sementara — mencoba ulang tidak akan
+      // mengubah apa pun sampai datanya dibetulkan manusia. Langsung mentokkan
+      // percobaannya supaya tidak menyibukkan antrean tiap siklus.
+      const bedaKva = pesan.startsWith("kVA berbeda");
+      const n = bedaKva ? MAX_ATTEMPTS : (row.amg_attempts ?? 0) + 1;
       await supabase.from("pengukuran_gardu")
-        .update({ amg_error: String(e).slice(0, 300), amg_attempts: n })
+        .update({ amg_error: pesan.slice(0, 300), amg_attempts: n })
         .eq("id", row.id);
-      const habis = n >= MAX_ATTEMPTS ? " — BERHENTI, antre ulang dari web untuk mencoba lagi" : "";
-      console.error(`  ✗ gagal (${n}/${MAX_ATTEMPTS}): ${row.no_gardu} - ${String(e).slice(0, 120)}${habis}`);
+      const habis = n >= MAX_ATTEMPTS
+        ? (bedaKva ? " — BUTUH PERBAIKAN DATA, tidak dicoba lagi" : " — BERHENTI, antre ulang dari web untuk mencoba lagi")
+        : "";
+      console.error(`  ✗ gagal (${n}/${MAX_ATTEMPTS}): ${row.no_gardu} - ${pesan.slice(0, 120)}${habis}`);
     }
   }
 }

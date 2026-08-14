@@ -37,6 +37,21 @@ function calcUnbalance(r, s, t) {
   return ((dev / (3 * avg)) * 100).toFixed(2);
 }
 
+/**
+ * Isi kolom keterangan di AMG: nama petugas, ditambah penanda kalau baris ini
+ * hasil penyeimbangan beban — mis. "Amnan (Penyeimbangan Beban)".
+ *
+ * Penandanya `hasil_penyeimbangan_id`, kolom di `pengukuran_gardu` yang merujuk
+ * balik ke rekap penyeimbangan. `jenis_pemeliharaan` TIDAK bisa dipakai: itu
+ * jenis WO yang menempel pada baris pengukuran ANOMALI-nya, dan pada baris
+ * hasilnya nilainya null (diperiksa langsung ke data).
+ */
+function keteranganUntuk(row) {
+  const nama = String(row.petugas_nama ?? "").trim();
+  if (!row.hasil_penyeimbangan_id) return nama;
+  return nama ? `${nama} (Penyeimbangan Beban)` : "(Penyeimbangan Beban)";
+}
+
 function buildBody(row, prefix) {
   const perjurusan = row.perjurusan || {};
   const f = {
@@ -61,7 +76,7 @@ function buildBody(row, prefix) {
     beban_total: String(row.beban_kva ?? 0),
     beban_total_persen: String(row.persen_beban ?? 0),
     temperatur: String(row.suhu_trafo ?? 0),
-    keterangan: String(row.petugas_nama ?? ""),
+    keterangan: keteranganUntuk(row),
     submit: "Simpan",
   };
   for (const [key, suffix] of [["A", "a"], ["B", "b"], ["C", "c"], ["D", "d"], ["K", "k"]]) {

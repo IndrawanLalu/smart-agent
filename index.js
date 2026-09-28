@@ -52,7 +52,23 @@ function keteranganUntuk(row) {
   return nama ? `${nama} (Penyeimbangan Beban)` : "(Penyeimbangan Beban)";
 }
 
-function buildBody(row, prefix) {
+/**
+ * Tegangan ujung per jurusan: ukuran LAPANGAN (`pengukuran_tegangan_ujung`,
+ * titik & foto wajib) bila ada, dari formulir beban (`perjurusan`) bila belum
+ * (`rencana-tegangan-ujung.md` T5). Tabel belum ada / gagal dibaca = seperti
+ * semula — pengiriman tidak boleh berhenti gara-gara tambahan ini.
+ */
+async function ujungLapangan(pengukuranId) {
+  const { data, error } = await supabase
+    .from("pengukuran_tegangan_ujung")
+    .select("jurusan,v_rn,v_sn,v_tn")
+    .eq("pengukuran_id", pengukuranId)
+    .eq("status", "Terkirim");
+  if (error) return {};
+  return Object.fromEntries((data || []).map((u) => [u.jurusan, { R: Number(u.v_rn), S: Number(u.v_sn), T: Number(u.v_tn) }]));
+}
+
+function buildBody(row, prefix, ujung = {}) {
   const perjurusan = row.perjurusan || {};
   const f = {
     kode: prefix + String(row.no_gardu ?? ""),
@@ -81,12 +97,13 @@ function buildBody(row, prefix) {
   };
   for (const [key, suffix] of [["A", "a"], ["B", "b"], ["C", "c"], ["D", "d"], ["K", "k"]]) {
     const jur = perjurusan[key];
+    const teg = ujung[key] || jur?.tegangan;
     f[`arusphasa_r_${suffix}`] = String(jur?.arus?.R ?? "");
-    f[`tegujung_r_${suffix}`] = String(jur?.tegangan?.R ?? "");
+    f[`tegujung_r_${suffix}`] = String(teg?.R ?? "");
     f[`arusphasa_s_${suffix}`] = String(jur?.arus?.S ?? "");
-    f[`tegujung_s_${suffix}`] = String(jur?.tegangan?.S ?? "");
+    f[`tegujung_s_${suffix}`] = String(teg?.S ?? "");
     f[`arusphasa_t_${suffix}`] = String(jur?.arus?.T ?? "");
-    f[`tegujung_t_${suffix}`] = String(jur?.tegangan?.T ?? "");
+    f[`tegujung_t_${suffix}`] = String(teg?.T ?? "");
     f[`arusphasa_n_${suffix}`] = String(jur?.arus?.N ?? "");
   }
   return new URLSearchParams(f);
@@ -180,7 +197,7 @@ async function sendOne(row, cfg) {
       "Content-Type": "application/x-www-form-urlencoded",
       "User-Agent": UA, Cookie: cookie, Referer: `${base}/index.php/cUkur/save_ukur`,
     },
-    body: buildBody(row, prefixCocok),
+    body: buildBody(row, prefixCocok, await ujungLapangan(row.id)),
     redirect: "manual",
   });
 
